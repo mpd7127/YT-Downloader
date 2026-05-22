@@ -1,1 +1,114 @@
+name: YouTube Downloader
 
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "YouTube URL"
+        required: true
+
+      quality:
+        description: "144 / 360 / 720 / 1080 / best / mp3"
+        required: true
+        default: "720"
+
+      subtitle:
+        description: "fa / en / both / none"
+        required: true
+        default: "fa"
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp
+          sudo apt update
+          sudo apt install ffmpeg zip -y
+
+      - name: Create folders
+        run: |
+          mkdir downloads
+          mkdir output
+
+      - name: Download Media
+        run: |
+
+          SUBS=""
+
+          if [ "${{ github.event.inputs.subtitle }}" = "fa" ]; then
+            SUBS="--write-auto-sub --sub-lang fa"
+          fi
+
+          if [ "${{ github.event.inputs.subtitle }}" = "en" ]; then
+            SUBS="--write-auto-sub --sub-lang en"
+          fi
+
+          if [ "${{ github.event.inputs.subtitle }}" = "both" ]; then
+            SUBS="--write-auto-sub --sub-lang fa,en"
+          fi
+
+          QUALITY="${{ github.event.inputs.quality }}"
+
+          if [ "$QUALITY" = "mp3" ]; then
+
+            yt-dlp \
+            -x \
+            --audio-format mp3 \
+            $SUBS \
+            -o "downloads/%(title)s.%(ext)s" \
+            "${{ github.event.inputs.url }}"
+
+          else
+
+            if [ "$QUALITY" = "best" ]; then
+              FORMAT="bestvideo+bestaudio/best"
+            else
+              FORMAT="bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]"
+            fi
+
+            yt-dlp \
+            $SUBS \
+            --embed-subs \
+            --convert-subs srt \
+            -f "$FORMAT" \
+            -o "downloads/%(title)s.%(ext)s" \
+            "${{ github.event.inputs.url }}"
+
+          fi
+
+      - name: Check size and compress
+        run: |
+
+          SIZE=$(du -sm downloads | cut -f1)
+
+          echo "Folder size: ${SIZE}MB"
+
+          if [ "$SIZE" -gt 1900 ]; then
+
+            echo "Large file detected → split zip"
+
+            zip -r -s 50m output/archive.zip downloads/
+
+          else
+
+            echo "Small file → direct upload"
+
+            cp -r downloads/* output/
+
+          fi
+
+      - name: Upload Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-download
+          path: output/
