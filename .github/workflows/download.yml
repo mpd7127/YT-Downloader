@@ -1,97 +1,177 @@
-name: YouTube Downloader
+name: 01 - 🎯 دانلود یوتیوب
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "YouTube URL"
+      video_urls:
+        description: '🔗 لینک ویدیو (چند لینک با فاصله)'
         required: true
+        type: string
+
+      download_subtitles:
+        description: '📝 زیرنویس (فارسی و انگلیسی)'
+        required: false
+        default: false
+        type: boolean
 
       quality:
-        description: "144 / 360 / 720 / 1080 / best / mp3"
-        required: true
-        default: "720"
+        description: '🎬 کیفیت و نوع'
+        required: false
+        default: 'best'
+        type: choice
+        options:
+          - best
+          - 2160
+          - 1440
+          - 1080
+          - 720
+          - 480
+          - audio
 
-      subtitle:
-        description: "fa / en / both / none"
-        required: true
-        default: "none"
-
-permissions:
-  contents: read
+      password:
+        description: '🔒 رمز (اختیاری برای محافظت)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
-  download:
+  get-video:
+    name: "📥 دانلود ویدیو"
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
 
     steps:
+      - name: Check URL provided
+        run: |
+          if [ -z "${{ github.event.inputs.video_urls }}" ]; then
+            echo "❌ No video URL provided!"
+            exit 1
+          fi
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git for Large Files
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.maxRequestBuffer 100M
+          git config --global core.compression 0
+          git config --global pack.windowMemory 256m
+          git config --global pack.packSizeLimit 100m
+          git config --global pack.threads 1
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+      - name: Start WARP Container
+        run: |
+          docker network create warp-net || true
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            caomingjun/warp || true
+
+          sleep 15
 
       - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install yt-dlp
-          sudo apt update
-          sudo apt install ffmpeg -y
+          sudo apt-get update
+          sudo apt-get install -y python3-pip ffmpeg zip p7zip-full curl jq bc unzip
+          pip3 install --upgrade yt-dlp
 
-      - name: Create Download Folder
+      - name: Download YouTube Video(s)
+        env:
+          YT_URLS: ${{ github.event.inputs.video_urls }}
+          YT_QUALITY: ${{ github.event.inputs.quality }}
+          YT_PASSWORD: ${{ github.event.inputs.password }}
+          DOWNLOAD_SUBS: ${{ github.event.inputs.download_subtitles }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          BRANCH: ${{ github.ref_name }}
+
         run: |
-          mkdir -p downloads
+          URLS_RAW="$YT_URLS"
+          read -ra URL_LIST <<< "$URLS_RAW"
 
-      - name: Download Media
-        shell: bash
-        run: |
+          BACKUP_DIR="/tmp/video_backup"
+          mkdir -p "$BACKUP_DIR"
+          mkdir -p videos
 
-          URL="${{ github.event.inputs.url }}"
-          QUALITY="${{ github.event.inputs.quality }}"
-          SUBTITLE="${{ github.event.inputs.subtitle }}"
+          SPLIT_MB=45
+          SPLIT_BYTES=$((SPLIT_MB * 1024 * 1024))
 
-          SUBS=""
+          echo "Total URLs: ${#URL_LIST[@]}"
+          echo "Quality: $YT_QUALITY"
 
-          if [ "$SUBTITLE" = "fa" ]; then
-            SUBS="--write-auto-sub --sub-lang fa"
-          fi
+          case "$YT_QUALITY" in
+            "audio") FORMAT="bestaudio/best";;
+            "2160") FORMAT="bestvideo[height<=2160]+bestaudio/best";;
+            "1440") FORMAT="bestvideo[height<=1440]+bestaudio/best";;
+            "1080") FORMAT="bestvideo[height<=1080]+bestaudio/best";;
+            "720") FORMAT="bestvideo[height<=720]+bestaudio/best";;
+            "480") FORMAT="bestvideo[height<=480]+bestaudio/best";;
+            *) FORMAT="bestvideo+bestaudio/best";;
+          esac
 
-          if [ "$SUBTITLE" = "en" ]; then
-            SUBS="--write-auto-sub --sub-lang en"
-          fi
+          URL_INDEX=0
 
-          if [ "$SUBTITLE" = "both" ]; then
-            SUBS="--write-auto-sub --sub-lang fa,en"
-          fi
+          for URL in "${URL_LIST[@]}"; do
+            URL_INDEX=$((URL_INDEX + 1))
+            TMP_DIR="tmp_$URL_INDEX"
+            mkdir -p "$TMP_DIR"
 
-          if [ "$QUALITY" = "mp3" ]; then
+            echo "Downloading: $URL"
 
             yt-dlp \
-              -x \
-              --audio-format mp3 \
-              $SUBS \
-              -o "downloads/%(title)s.%(ext)s" \
-              "$URL"
-
-          else
-
-            if [ "$QUALITY" = "best" ]; then
-              FORMAT="best"
-            else
-              FORMAT="best[height<=${QUALITY}]"
-            fi
-
-            yt-dlp \
-              -f "$FORMAT" \
+              --proxy "socks5://127.0.0.1:1080" \
+              --format "$FORMAT" \
               --merge-output-format mp4 \
-              --embed-subs \
-              --convert-subs srt \
-              $SUBS \
-              -o "downloads/%(title)s.%(ext)s" \
-              "$URL"
+              --output "$TMP_DIR/%(title)s.%(ext)s" \
+              --no-playlist \
+              --retries 5 \
+              "$URL" || continue
 
-          fi
+            for FILE in "$TMP_DIR"/*; do
+              [ -f "$FILE" ] || continue
 
-      - name: Upload Files
-        uses: actions/upload-artifact@v4
-        with:
-          name: youtube-download
-          path: downloads/
+              SIZE=$(stat -c%s "$FILE")
+              NAME=$(basename "$FILE")
+              NAME_NO_EXT="${NAME%.*}"
+
+              FINAL_DIR="$BACKUP_DIR/$NAME_NO_EXT"
+              mkdir -p "$FINAL_DIR"
+
+              cp "$FILE" "$FINAL_DIR/"
+
+              echo "Processed: $NAME"
+            done
+
+            rm -rf "$TMP_DIR"
+          done
+
+          echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
+
+      - name: Upload to repo
+        run: |
+          BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+
+          mkdir -p videos
+
+          cp -r "$BACKUP_DIR"/* videos/ || true
+
+          git add videos
+          git commit -m "📥 YouTube downloads" || echo "No changes"
+          git push || echo "Push skipped"
+
+      - name: Summary
+        run: |
+          echo "===================================="
+          echo "✅ Download completed"
+          echo "===================================="
